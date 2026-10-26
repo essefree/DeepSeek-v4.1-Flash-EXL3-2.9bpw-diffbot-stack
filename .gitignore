@@ -1,0 +1,8 @@
+.env
+pack/
+pack-*/
+logs/
+__pycache__/
+*.pyc
+*.so
+.cache/

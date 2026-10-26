@@ -1,0 +1,5 @@
+qwen_pack_scan.py, qwen_pack_config.py and regenerate_safetensors_index.py are
+tools/exl3_pack_tools/ of vllm-exl3 (https://github.com/vcruz305/vllm-exl3) at commit
+d3cfd394920360d69f820d2dc96f8292a9e10283, Copyright 2026 Victor Cruz (vcruz305), AGPL-3.0-only.
+They are vendored unmodified so prepare_pack.py runs offline and against the same commit diffbot's
+image installs. Their license: https://github.com/vcruz305/vllm-exl3/blob/d3cfd394/LICENSE
