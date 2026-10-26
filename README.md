@@ -69,6 +69,7 @@ VRAM (the cold-path prefill kernel exists for K=3 only), which the plan enforces
 | `tools/vendor/` | `vllm-exl3` pack tools at commit `d3cfd394` (AGPL-3.0, see `NOTICE`) |
 | `kernels/add_k2_mul1.py`, `kernels/build.sh` | K=2 mul1 instances for `xmoe` / `xmoe_do_i8`, built with diffbot's scripts in their image |
 | `serve.sh` | runs diffbot's `recipe/serve/serve.sh` with this pack, plan, kernels and the knobs that must differ |
+| `overlay/sitecustomize.py` | runs diffbot's sitecustomize, then two hooks this quant needs: vLLM's block-FP8 shared-expert padding skips EXL3 tensors, and vllm-exl3 loads EXL3 modules on a `ReplicatedLinear` (the indexer `wq_b`) unsharded (its TP geometry comes from `LinearBase`, which carries the global TP size even for replicated layers) |
 | `tests/` | offline checks against a header-only mock of the quant |
 
 ## Quick start (on the box)
@@ -111,8 +112,9 @@ python3 tests/test_sitecustomize_hook.py   # the shared-expert padding hook, aga
 ## Open items (box-verified)
 
 1. The FP8 delegate's handling of the converted modules, and `wo_a` through the FP8 grouped path.
-2. `compressor.*` / `fused_wqa_wkv` (fused modules) matched by prefix in the plugin; the Engram projection
-   (`engram.wkv`) is DeepSeek's FP8 one from diffbot's shards, not the quant's EXL3 copy.
+2. `fused_wqa_wkv` is matched by prefix in the plugin (box-verified); the compressor is not EXL3 at all
+   (vLLM builds it unquantized, see the table); the Engram projection (`engram.wkv`) is DeepSeek's FP8 one
+   from diffbot's shards, not the quant's EXL3 copy.
 3. The K=2 `xmoe` instances compile and the plugin picks them for layers 18–22.
 4. VRAM: estimated ~89 GiB/rank with diffbot's plan minus the K=2 layers; `KV_MEM` is the lever.
 5. Speed and KL against the Mia port and against diffbot's pack.

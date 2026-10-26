@@ -61,11 +61,47 @@ def _ds29_patch_model_module(mod) -> None:
           file=sys.stderr)
 
 
+# vllm-exl3 dense linears on a ReplicatedLinear (the DSA indexer's wq_b: 1280 -> 4096, EXL3 K=5 in this
+# quant). The plugin's _resolve_tp_geometry() takes the layer's tp_rank/tp_size, which vLLM's LinearBase
+# sets from the global TP size for every linear that is not disable_tp -- a ReplicatedLinear included,
+# although vLLM never shards it. With TP=2 the plugin then narrowed the 4096-wide svh to 2048 for a
+# 4096-wide parameter ("EXL3 linear load shape mismatch shard=0 suffix=svh: dest (4096,) != loaded (2048,)").
+# diffbot's pack has no EXL3 dense modules, so their stack never met this. Replicated = TP geometry (0, 1).
+_PLUGIN_MODULE = "vllm_exl3.exl3"
+
+
+def _ds29_patch_plugin_module(mod) -> None:
+    orig = getattr(mod, "_resolve_tp_geometry", None)
+    if orig is None or getattr(orig, "_ds29_wrapped", False):
+        print(f"[sitecustomize-2.9bpw] vllm-exl3: _resolve_tp_geometry {'already patched' if orig else 'not found'}",
+              file=sys.stderr)
+        return
+    try:
+        from vllm.model_executor.layers.linear import ReplicatedLinear
+    except Exception as exc:  # pragma: no cover
+        print(f"[sitecustomize-2.9bpw] cannot import ReplicatedLinear: {exc!r}", file=sys.stderr)
+        return
+
+    def resolve_tp_geometry(*owners, _orig=orig):
+        if any(isinstance(o, ReplicatedLinear) for o in owners):
+            return 0, 1
+        return _orig(*owners)
+
+    resolve_tp_geometry._ds29_wrapped = True
+    mod._resolve_tp_geometry = resolve_tp_geometry
+    print("[sitecustomize-2.9bpw] vllm-exl3: ReplicatedLinear EXL3 modules load unsharded (TP geometry 0/1)",
+          file=sys.stderr)
+
+
+_POST_IMPORT = {_MODEL_MODULE: _ds29_patch_model_module, _PLUGIN_MODULE: _ds29_patch_plugin_module}
+
+
 class _Ds29PostImport(importlib.abc.MetaPathFinder):
-    """Runs _ds29_patch_model_module right after vLLM's DeepSeek-V4.1 model module is executed."""
+    """Runs the matching _POST_IMPORT hook right after one of those modules is executed."""
 
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != _MODEL_MODULE:
+        hook = _POST_IMPORT.get(fullname)
+        if hook is None:
             return None
         spec = None
         for finder in sys.meta_path:
@@ -78,15 +114,16 @@ class _Ds29PostImport(importlib.abc.MetaPathFinder):
             return None
         loader, orig_exec = spec.loader, spec.loader.exec_module
 
-        def exec_module(module, _orig=orig_exec):
+        def exec_module(module, _orig=orig_exec, _hook=hook):
             _orig(module)
-            _ds29_patch_model_module(module)
+            _hook(module)
 
         loader.exec_module = exec_module  # SourceFileLoader instances are per-module
         return spec
 
 
-if _MODEL_MODULE in sys.modules:
-    _ds29_patch_model_module(sys.modules[_MODEL_MODULE])
-elif not any(isinstance(f, _Ds29PostImport) for f in sys.meta_path):
+for _name, _hook in _POST_IMPORT.items():
+    if _name in sys.modules:
+        _hook(sys.modules[_name])
+if not any(isinstance(f, _Ds29PostImport) for f in sys.meta_path):
     sys.meta_path.insert(0, _Ds29PostImport())
