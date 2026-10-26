@@ -34,17 +34,16 @@ eval "$resolved"
 export PACK
 REC=$DIFFBOT/recipe
 PLAN_NAME=${PLAN_NAME:-plan-2.9bpw-${DIFFBOT_PLAN:-plan-1017-agent30-c512.json}}
-need_pack=0; need_kernels=0
-[ -f "$PACK/PACK_INFO.json" ] && [ -f "$REC/plans/$PLAN_NAME" ] || need_pack=1
+need_kernels=0
 [ -d "$REC/kernels/build/xmoe_k2" ] && [ -d "$REC/kernels/build/k2/xmoe_do_i8" ] || need_kernels=1
 if [ "${NO_AUTO_PREPARE:-0}" = "1" ]; then
-    [ "$need_pack" = 0 ] || { echo "pack $PACK not assembled: ./prepare_pack.py --model '$MODEL'"; exit 1; }
+    [ -f "$PACK/PACK_INFO.json" ] && [ -f "$REC/plans/$PLAN_NAME" ] || { echo "pack $PACK not assembled: ./prepare_pack.py --model '$MODEL'"; exit 1; }
     [ "$need_kernels" = 0 ] || { echo "K=2 kernels missing: bash kernels/build.sh"; exit 1; }
 else
-    if [ "$need_pack" = 1 ]; then
-        echo "[serve] pack $PACK not assembled yet -> ./prepare_pack.py --model '$MODEL'"
-        python3 "$ROOT/prepare_pack.py" --env "$ROOT/.env" --model "$MODEL" --pack "$PACK"
-    fi
+    # Always: the pack must reflect the current recipe (a converter fix re-converts only the shards it
+    # concerns; the rest is header scans and a config / index / plan rebuild, seconds on a finished pack).
+    echo "[serve] prepare_pack.py --model '$MODEL' (re-converts only what changed)"
+    python3 "$ROOT/prepare_pack.py" --env "$ROOT/.env" --model "$MODEL" --pack "$PACK"
     if [ "$need_kernels" = 1 ]; then
         echo "[serve] K=2 mul1 kernels not built yet -> kernels/build.sh"
         bash "$ROOT/kernels/build.sh"
