@@ -6,6 +6,7 @@ This writes a copy with three exact-text edits (it refuses if their script chang
   * the `API_KEY` requirement becomes optional,
   * `--api-key "$API_KEY"` is passed only when API_KEY is set,
   * REPO (their recipe directory) is pinned, since the copy lives outside their tree.
+Matched by pattern, so a revision of their script that reflows those lines still patches.
 The warmup's `Authorization: Bearer` header stays: vLLM ignores it when no key is configured.
 
 usage: patch_diffbot_serve.py <diffbot recipe dir> <output file>
@@ -16,23 +17,32 @@ import os
 import sys
 from pathlib import Path
 
+import re
+
+# (pattern, replacement, what): each must match exactly once, wherever it sits on its line, so a
+# revision of their script that moves things around still patches, and one that changed them refuses.
 EDITS = [
-    (': "${API_KEY:?set API_KEY}"\n',
-     'API_KEY=${API_KEY:-}   # [2.9bpw recipe] empty = no authentication\n'),
-    ('--host 0.0.0.0 --port "$PORT" --api-key "$API_KEY" \\\n',
-     '--host 0.0.0.0 --port "$PORT" ${API_KEY:+--api-key "$API_KEY"} \\\n'),
+    (re.compile(r'^: "\$\{API_KEY:\?[^}]*\}"[ \t]*\n', re.M),
+     'API_KEY=${API_KEY:-}   # [2.9bpw recipe] empty = no authentication\n',
+     'the `: "${API_KEY:?...}"` requirement'),
+    (re.compile(r'--api-key "\$API_KEY"'),
+     '${API_KEY:+--api-key "$API_KEY"}',
+     'the `--api-key "$API_KEY"` argument'),
+    (re.compile(r'^REPO=\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/\.\." && pwd\)[ \t]*\n', re.M),
+     None,  # filled with the pinned recipe path
+     'the REPO= line'),
 ]
 
 
 def patch(text: str, recipe: Path) -> str:
-    for old, new in EDITS:
-        if text.count(old) != 1:
-            raise SystemExit(f"diffbot's serve.sh changed: expected exactly one {old.strip()!r}")
-        text = text.replace(old, new)
-    old_repo = 'REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)\n'
-    if text.count(old_repo) != 1:
-        raise SystemExit("diffbot's serve.sh changed: REPO= line not found")
-    text = text.replace(old_repo, f'REPO={str(recipe)!r}   # [2.9bpw recipe] pinned: this copy lives outside their tree\n')
+    for pattern, new, what in EDITS:
+        hits = pattern.findall(text)
+        if len(hits) != 1:
+            raise SystemExit(f"diffbot's serve.sh differs from what this patch expects: {what} found {len(hits)} times "
+                             f"(run: grep -n 'API_KEY\\|^REPO=' {recipe}/serve/serve.sh)")
+        if new is None:
+            new = f'REPO={str(recipe)!r}   # [2.9bpw recipe] pinned: this copy lives outside their tree\n'
+        text = pattern.sub(lambda m: new, text, count=1)
     return text
 
 
