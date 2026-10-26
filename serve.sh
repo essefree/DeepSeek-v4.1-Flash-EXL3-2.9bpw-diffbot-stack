@@ -4,9 +4,11 @@
 # Everything else (image, patches, mounts, API, CPU_EXPERTS, 1M context, DSpark k=5, warmup) is theirs;
 # their script documents every knob and all of them can still be set in the environment.
 #
-#   API_KEY=change-me ./serve.sh --model /data/models/my-exl3-quant     # a directory
-#   API_KEY=change-me ./serve.sh --model essefree/my-exl3-quant          # a Hugging Face repo (fetched)
-#   API_KEY=change-me ./serve.sh                                         # MODEL= from .env
+#   ./serve.sh --model /data/models/my-exl3-quant     # a directory
+#   ./serve.sh --model essefree/my-exl3-quant          # a Hugging Face repo (fetched)
+#   ./serve.sh                                         # MODEL= from .env
+# No authentication unless API_KEY is set (API_KEY=secret ./serve.sh -> clients send it as the Bearer
+# token); diffbot's script requires a key, so a patched copy of it runs (tools/patch_diffbot_serve.py).
 # Like the first recipe's start.sh, this does the whole path on the first run: fetch the quant
 # (HF), assemble the pack (prepare_pack.py: stock drafter download + GPU conversion, ~30 min once),
 # build the K=2 kernels (kernels/build.sh), then serve. NO_AUTO_PREPARE=1 only checks and stops.
@@ -23,7 +25,7 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$ROOT/.env" ] || { echo "no .env (cp env.example .env)"; exit 1; }
 set -a; source "$ROOT/.env"; set +a
-: "${API_KEY:?set API_KEY}"
+export API_KEY=${API_KEY:-}
 : "${DIFFBOT:?set DIFFBOT in .env (the downloaded diffbot pack)}"
 model_args=()
 [ -n "$MODEL_ARG" ] && model_args=(--model "$MODEL_ARG")
@@ -66,5 +68,10 @@ export DS41_DENSE_GEMV=${DS41_DENSE_GEMV:-0} DS41_DENSE_ONE_COPY=${DS41_DENSE_ON
 export DS41_WOA_FP8=${DS41_WOA_FP8:-0} DS41_FP8_LMHEAD=${DS41_FP8_LMHEAD:-0}
 export LINEAR_BACKEND=${LINEAR_BACKEND-}          # no Marlin MXFP8 dense repack (nothing to repack)
 export DENSE_HYBRID_M=${DENSE_HYBRID_M:-0}
-echo "[serve] pack $PACK (2.9 bpw EXL3 on diffbot's stack), plan $PLAN, kernels $XMOE_EXT + $EXL3_DO_DIR"
-exec bash "$REC/serve/serve.sh"
+# diffbot's serve.sh with API_KEY optional (regenerated when their script changes)
+DSERVE=$ROOT/.cache/diffbot-serve.sh
+if [ ! -f "$DSERVE" ] || [ "$REC/serve/serve.sh" -nt "$DSERVE" ]; then
+    python3 "$ROOT/tools/patch_diffbot_serve.py" "$REC" "$DSERVE"
+fi
+echo "[serve] pack $PACK (2.9 bpw EXL3 on diffbot's stack), plan $PLAN, kernels $XMOE_EXT + $EXL3_DO_DIR, auth $([ -n "$API_KEY" ] && echo 'Bearer token' || echo none)"
+exec bash "$DSERVE"

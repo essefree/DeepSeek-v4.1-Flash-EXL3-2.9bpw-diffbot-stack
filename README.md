@@ -77,8 +77,12 @@ with `recipe/` and shards 47/48), their image built (`bash recipe/docker/build.s
 ```bash
 git clone https://github.com/essefree/DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack.git && cd DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack
 cp env.example .env                                     # DIFFBOT (and MODEL, or pass --model)
-API_KEY=change-me ./serve.sh --model /data/models/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw
+./serve.sh --model /data/models/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw
 ```
+
+The API has no authentication unless `API_KEY=…` is set (then clients send it as the Bearer token).
+diffbot's `serve.sh` requires a key, so the wrapper runs a copy of it with the key made optional
+(`tools/patch_diffbot_serve.py`, regenerated when their script changes).
 
 `--model` takes the quant the way the first recipe does: a local directory, or a Hugging Face repo id
 (`essefree/my-exl3-quant`, fetched into `./models/`); `MODEL=` in `.env` is the same thing. The first run
