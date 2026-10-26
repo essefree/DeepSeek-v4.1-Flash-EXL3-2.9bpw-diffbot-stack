@@ -201,14 +201,17 @@ def main() -> int:
         raise SystemExit(f"--skip-convert but {len(todo)} converted shards are missing in {pack}: {todo[:3]}...")
     if todo:
         log(f"converting {len(todo)} shards in {image} on {a.device} (~17 GB of output) ...")
+        # as the calling user (like diffbot's kernel builds), so the shards it writes are ours to read
         run(["docker", "run", "--rm", "--gpus", "all", "--ipc", "host",
+             "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
              "-e", "VLLM_NO_USAGE_STATS=1", "-e", "DO_NOT_TRACK=1",
              "-v", f"{quant}:/quant:ro", "-v", f"{pack}:/pack", "-v", f"{TOOLS}:/tools:ro",
              "--entrypoint", "python3", image, "/tools/convert_natives.py", "--src", "/quant", "--out", "/pack",
              "--device", a.device, "--only-shards", ",".join(todo), "--manifest", "/pack/convert_manifest.json"])
-    for s in affected:
-        if not (pack / s).is_file():
-            raise SystemExit(f"converted shard missing: {pack / s}")
+    unreadable = [s for s in affected if not (pack / s).is_file() or not os.access(pack / s, os.R_OK)]
+    if unreadable:
+        raise SystemExit(f"{len(unreadable)} converted shards missing or not readable (e.g. {pack / unreadable[0]}). "
+                         f"Shards written by an older run belong to root: sudo chown -R {os.getuid()}:{os.getgid()} '{pack}'")
 
     # ---- 4. links
     linked = 0
