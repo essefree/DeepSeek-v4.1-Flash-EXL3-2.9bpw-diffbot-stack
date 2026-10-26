@@ -95,6 +95,8 @@ def fake_convert(quant: Path, pack: Path, plan: dict) -> None:
             out[mod + ".scale"] = ("F8_E8M0", [256, 128])
         for mod in spec["wk"]:
             out[mod + ".weight"] = ("BF16", [128, 512])
+        if spec.get("head"):
+            out["head.weight"] = ("BF16", [129280, 5120])
         for name in spec["bf16"]:
             dt, shape = out.pop(name)
             out[name] = ("F8_E4M3", shape)
@@ -143,7 +145,8 @@ def main() -> int:
     assert n_bf == 54, n_bf
     assert n_mtp > 0, "shard 43's mtp tensors must be dropped"
     assert "model-00042-of-00043.safetensors" not in plan, "drafter-only shard is not rewritten"
-    print(f"plan: {len(plan)} shards rewritten; wo_a {n_woa}, wk {n_wk}, bf16 {n_bf}, mtp dropped {n_mtp}")
+    assert sum(1 for d in plan.values() if d.get("head")) == 1
+    print(f"plan: {len(plan)} shards rewritten; wo_a {n_woa}, wk {n_wk}, bf16 {n_bf}, mtp dropped {n_mtp}, lm_head 1")
     fake_convert(quant, pack, plan)
 
     rc = subprocess.run([sys.executable, str(ROOT / "prepare_pack.py"), "--quant", str(quant), "--diffbot", str(diffbot),
@@ -165,13 +168,12 @@ def main() -> int:
     assert idx["layers.10.attn.wo_b.weight"] and "layers.10.attn.wo_b.scale" in names, "BF16 wo_b -> block-FP8"
     assert "layers.9.attn.wo_b.trellis" in names, "EXL3 wo_b stays EXL3"
     assert "layers.2.attn.indexer.wk.weight" in names
-    assert "head.trellis" in names
+    assert "head.trellis" not in names and idx["head.weight"].endswith("-of-00043.safetensors")
     dup = collections.Counter(idx.values())
     cfg = json.load(open(pack / "config.json"))["quantization_config"]
     assert cfg["mtp_experts"] == "source" and cfg["mtp_experts_start_layer"] == 40
     assert cfg["layer_bits"] == {str(L): 2 for L in range(18, 23)}, cfg["layer_bits"]
     L = cfg["non_routed_exl3"]["layers"]
-    assert L["language_model.lm_head"]["bits"] == 6
     assert L["language_model.model.layers.0.attn.fused_wqa_wkv"]["bits"] == 6
     assert L["language_model.model.layers.5.attn.fused_wqa_wkv"]["bits"] == 5
     assert L["language_model.model.layers.11.ffn.shared_experts.gate_up_proj"]["bits"] == 4
@@ -183,7 +185,8 @@ def main() -> int:
     assert "language_model.model.layers.2.attn.indexer.wk" not in L
     assert L["language_model.model.layers.1.engram.wkv"]["bits"] == 5 if "language_model.model.layers.1.engram.wkv" in L else True
     assert not any(int(k.split(".layers.")[1].split(".")[0]) >= 40 for k in L if ".layers." in k), "drafter layers are not EXL3"
-    assert len(L) == 159, len(L)
+    assert len(L) == 158, len(L)
+    assert "language_model.lm_head" not in L
     assert cfg["non_routed_quantization"]["quant_method"] == "deepseek_v4_fp8"
     assert cfg["engram_embed_format"] == "int4_fp16s32"
     assert "modules" not in cfg["non_routed_exl3"]

@@ -11,6 +11,7 @@ quant are neither loadable as EXL3 by that stack nor already in DeepSeek's forma
   layers.N.attn.indexer.wk        EXL3 K=8 (4 layers)           wk.weight    BF16 [128, 512]
   layers.N.attn.wo_b (27 layers)  BF16 .weight (no scales)      wo_b.weight  F8_E4M3 [5120, 8192] + scale [160, 256]
   layers.N.ffn.shared_experts.w2  BF16 .weight (27 layers)      w2.weight    F8_E4M3 [5120, 2304] + scale [160, 72]
+  head                            EXL3 K=6 (lm_head)            head.weight  BF16 [129280, 5120] (DeepSeek's layout)
   layers.{1,14}.engram.*          EXL3 wkv + BF16 q/k copies    dropped: diffbot's Engram shards carry the stock ones
   mtp.*                           K=4 EXL3 drafter              dropped: stock 1017 shards 44-46 carry the drafter
 
@@ -51,6 +52,9 @@ RE_ENGRAM = re.compile(r"^layers\.\d+\.engram\.(wkv\.(trellis|suh|svh|mul1|mcg)|
 # The quant's own DSpark drafter (K=4 EXL3) is replaced by the stock 1017 drafter shards; its tensors
 # are dropped wherever they share a shard with main-stack tensors (drafter-only shards are not linked).
 RE_MTP = re.compile(r"^mtp\.")
+# lm_head: the quant packs it as EXL3 K=6 (`head.trellis` ...), but this vLLM's DeepSeek loader maps only
+# the name `head.weight` onto lm_head, so it goes back to DeepSeek's BF16 [vocab, hidden] (exact for K=6).
+RE_HEAD = re.compile(r"^head\.(trellis|suh|svh|mul1|mcg)$")
 
 
 def shard_header(path: Path) -> dict:
@@ -67,8 +71,12 @@ def classify(h: dict) -> dict:
     Decided from the shard's own header, never from the index: the quant's index is stale (it lists
     tensors that are not there and omits some that are), and vLLM loads what the shards hold.
     """
-    spec = {"wo_a": set(), "wk": set(), "bf16": [], "drop": []}
+    spec = {"wo_a": set(), "wk": set(), "bf16": [], "drop": [], "head": False}
     for name, v in h.items():
+        if RE_HEAD.match(name):
+            spec["head"] = True
+            spec["drop"].append(name)
+            continue
         m = RE_WOA_SLICE.match(name)
         if m:
             spec["wo_a"].add(m.group(1))
@@ -85,7 +93,7 @@ def classify(h: dict) -> dict:
         if RE_ENGRAM.match(name) or RE_MTP.match(name):
             spec["drop"].append(name)
     return {"wo_a": sorted(spec["wo_a"]), "wk": sorted(spec["wk"]), "bf16": sorted(spec["bf16"]),
-            "drop": sorted(spec["drop"])}
+            "drop": sorted(spec["drop"]), "head": spec["head"]}
 
 
 def needs_work(h: dict) -> bool:
@@ -112,7 +120,7 @@ def plan_shards(src: Path) -> dict[str, dict]:
         if shard_role(h) != "main":
             continue
         spec = classify(h)
-        if spec["wo_a"] or spec["wk"] or spec["bf16"] or spec["drop"]:
+        if spec["wo_a"] or spec["wk"] or spec["bf16"] or spec["drop"] or spec["head"]:
             out[path.name] = spec
     return out
 
@@ -181,7 +189,7 @@ def convert_shard(src: Path, out: Path, shard: str, spec: dict, device) -> dict:
             tensors[k] = f.get_tensor(k)
     drop = set(spec["drop"])
     added = {}
-    stats = {"shard": shard, "wo_a": [], "wk": [], "bf16": [], "err": {}}
+    stats = {"shard": shard, "wo_a": [], "wk": [], "bf16": [], "head": False, "err": {}}
     with torch.no_grad():
         for mod in spec["wo_a"]:
             parts = []
@@ -197,6 +205,11 @@ def convert_shard(src: Path, out: Path, shard: str, spec: dict, device) -> dict:
             w = reconstruct(tensors, mod, device)                                  # [128, 512]
             added[mod + ".weight"] = w.to(torch.bfloat16).cpu()
             stats["wk"].append(mod)
+        if spec.get("head"):
+            w = reconstruct(tensors, "head", device)                               # [129280, 5120]
+            added["head.weight"] = w.to(torch.bfloat16).cpu()
+            stats["head"] = True
+            del w
         for name in spec["bf16"]:
             w = tensors[name].to(device).float()
             q, s = to_block_fp8(w)
@@ -242,7 +255,8 @@ def main() -> int:
         n_woa = sum(len(d["wo_a"]) for d in plan.values())
         n_wk = sum(len(d["wk"]) for d in plan.values())
         n_bf = sum(len(d["bf16"]) for d in plan.values())
-        print(f"{len(plan)} shards to rewrite: wo_a modules {n_woa}, indexer.wk {n_wk}, bf16 natives {n_bf}, "
+        n_head = sum(1 for d in plan.values() if d.get("head"))
+        print(f"{len(plan)} shards to rewrite: wo_a modules {n_woa}, indexer.wk {n_wk}, bf16 natives {n_bf}, lm_head {n_head}, "
               f"EXL3 tensors dropped {sum(len(d['drop']) for d in plan.values())}")
         if a.manifest:
             json.dump({"plan": plan}, open(a.manifest, "w"), indent=1)
@@ -255,7 +269,8 @@ def main() -> int:
     for shard in sorted(plan):
         if only and shard not in only:
             continue
-        print(f"{shard}: wo_a {len(plan[shard]['wo_a'])} wk {len(plan[shard]['wk'])} bf16 {len(plan[shard]['bf16'])} ...",
+        print(f"{shard}: wo_a {len(plan[shard]['wo_a'])} wk {len(plan[shard]['wk'])} bf16 {len(plan[shard]['bf16'])}"
+              f"{' head' if plan[shard].get('head') else ''} drop {len(plan[shard]['drop'])} ...",
               flush=True)
         st = convert_shard(src, Path(a.out), shard, plan[shard], device)
         worst = max(st["err"].values(), default=0.0)

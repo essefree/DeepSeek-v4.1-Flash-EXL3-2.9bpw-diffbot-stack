@@ -46,6 +46,7 @@ against this quant's shard headers (every tensor, no weights): experts K=3 with 
 | `attn.wo_a` (40 layers) | 8 EXL3 K=5 slices per layer (`wo_a.slice.0..7`) | nightly vLLM builds `wo_a` as one grouped (`is_bmm`) linear; the plugin has no path for packed slices | reconstructs the slices with ExLlamaV3 (exact w.r.t. the quantized values), concatenates them into DeepSeek's `[8192, 4096]` layout and stores them in DeepSeek's **block-FP8** format (e4m3 + ue8m0 scales per 32×32), which the stack's FP8 delegate serves |
 | `attn.indexer.wk` (4 layers) | EXL3 K=8 | the plugin accepts dense K 2–6 only | same: reconstruct → block-FP8 (4 tiny 128×512 tensors) |
 | `attn.wo_b`, `ffn.shared_experts.w2` (layers 10–36) | plain BF16 `.weight` (54 tensors) | the FP8 delegate expects scales; stock has these in block-FP8 | BF16 → block-FP8 (lossy at FP8 precision, the same precision DeepSeek ships these in) |
+| `head` (lm_head) | EXL3 K=6 | this vLLM's DeepSeek loader routes only the name `head.weight` to lm_head | reconstructed (exact for K=6) to DeepSeek's BF16 `head.weight [129280, 5120]`; diffbot's `DS41_FP8_LMHEAD` can then apply |
 | `mtp.*` (drafter) | EXL3 K=4 | no K=4 `xmoe` kernels, and a weak drafter | dropped; stock 1017 shards 44–46 take their place, `mtp_experts: "source"` |
 | `layers.{1,14}.engram.wkv` (+ `q/k_weight`) | EXL3 K=5/4 | diffbot's Engram shards already carry DeepSeek's FP8 `wkv` and the BF16 `q/k` next to the int4 tables; two copies would collide | the quant's copies are dropped, the stock ones serve |
 | Engram tables | stock fp8 shards 47/48 | too big to pin (diffbot pins Engram in host RAM) | diffbot's int4 shards 47/48, `engram_embed_format: int4_fp16s32` |
@@ -98,7 +99,7 @@ straight to serving. The steps also run on their own: `./prepare_pack.py --model
 `tests/test_offline.py` builds a header-only mock of the quant from its index and `quantization_config.json`,
 fakes the conversion exactly as `convert_natives.py` would rewrite each shard, mocks diffbot's pack and the
 stock drafter from real shard headers, runs `prepare_pack.py` on it and checks the result: 41 shards
-rewritten (40 layer shards for `wo_a`, shard 43 for the drafter leftovers), 159 dense EXL3 modules keyed by
+rewritten (40 layer shards for `wo_a`, shard 43 for lm_head and the drafter leftovers), 158 dense EXL3 modules keyed by
 vLLM prefix (K 4/5/6), drafter and Engram names present, no stale slices.
 
 ```bash

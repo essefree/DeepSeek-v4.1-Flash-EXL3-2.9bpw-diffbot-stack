@@ -10,7 +10,6 @@ fused:
   layers.N.attn.compressor.wkv + .wgate           -> ...attn.compressor.fused_wkv_wgate
   layers.N.ffn.shared_experts.w1 + .w3            -> ...ffn.shared_experts.gate_up_proj
   layers.N.ffn.shared_experts.w2                  -> ...ffn.shared_experts.down_proj
-  head                                            -> language_model.lm_head
   layers.N.<anything else>                        -> language_model.model.layers.N.<anything else>
 
 Fused modules need one K; this refuses when the halves disagree. Entries at K=0 (tensors stored
@@ -56,7 +55,7 @@ MTP_START_LAYER = 40
 def map_key(key: str) -> str | None:
     """vLLM module prefix for a checkpoint module prefix; None = not served as EXL3."""
     if key == "head":
-        return LM_HEAD
+        return None  # reconstructed to BF16 head.weight by convert_natives.py (vLLM maps only that name)
     m = re.match(r"^layers\.(\d+)\.(.+)$", key)
     if not m:
         return None  # mtp.*, vision.*, ...

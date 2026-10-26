@@ -251,7 +251,7 @@ def main() -> int:
     idx = json.loads((pack / "model.safetensors.index.json").read_text())["weight_map"]
     names = set(idx)
     problems = []
-    for bad in ("wo_a.slice.", ".indexer.wk.trellis", ".engram.wkv.trellis"):
+    for bad in ("wo_a.slice.", ".indexer.wk.trellis", ".engram.wkv.trellis", "head.trellis"):
         hits = [n for n in names if bad in n]
         if hits:
             problems.append(f"{len(hits)} unconverted tensors like {hits[0]}")
@@ -259,6 +259,8 @@ def main() -> int:
         problems.append("no mtp.* tensors (drafter missing)")
     if not any(n.endswith(".engram.embed.weight") for n in names):
         problems.append("no Engram tables")
+    if "head.weight" not in names:
+        problems.append("no head.weight (lm_head)")
     cfg = json.loads((pack / "config.json").read_text())["quantization_config"]
     for key in ("layer_bits", "non_routed_exl3", "non_routed_quantization", "mtp_experts", "engram_embed_format"):
         if key not in cfg:
