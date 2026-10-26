@@ -71,8 +71,9 @@ VRAM (the cold-path prefill kernel exists for K=3 only), which the plan enforces
 
 ## Quick start (on the box)
 
-Prerequisites: diffbot's pack downloaded (`~/models/diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000`,
-with `recipe/` and shards 47/48), their image built (`bash recipe/docker/build.sh`), and this quant.
+Prerequisites: diffbot's `recipe/` (from their pack download), their image built (`bash recipe/docker/build.sh`),
+their int4 Engram shards 47/48 somewhere on disk (`ENGRAM_DIR`; default the pack folder, or e.g. the first
+recipe's `engram-int4`, so they are not downloaded twice), and this quant.
 
 ```bash
 git clone https://github.com/essefree/DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack.git && cd DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack

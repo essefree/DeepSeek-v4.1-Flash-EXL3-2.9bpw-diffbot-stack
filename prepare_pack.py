@@ -6,7 +6,9 @@
                                        slices / indexer.wk / BF16 wo_b, w2 / the Engram projection,
                                        which tools/convert_natives.py rewrote (DeepSeek block-FP8, BF16)
     model-00044..46-of-00048.safetensors  stock DeepSeek-V4.1-Flash-1017 drafter (hardlinked)
-    model-00047..48-of-00048.safetensors  diffbot's int4 Engram tables (hardlinked)
+    model-00047..48-of-00048.safetensors  diffbot's int4 Engram tables (hardlinked from ENGRAM_DIR, default
+                                       the diffbot pack; any folder holding those two files works, e.g. the
+                                       first recipe's ./engram-int4)
     config.json                        plugin vocabulary (tools/vendor + tools/rewrite_config.py)
     model.safetensors.index.json       rebuilt from the shard headers
     plan.json                          host-expert plan (also installed into diffbot's recipe/plans/)
@@ -109,6 +111,7 @@ def main() -> int:
     ap.add_argument("--model", help="quant: a directory or a Hugging Face repo id (MODEL in .env)")
     ap.add_argument("--quant", help="alias of --model for a directory")
     ap.add_argument("--diffbot"), ap.add_argument("--pack")
+    ap.add_argument("--engram", help="directory with diffbot's int4 model-00047/48-of-00048.safetensors (ENGRAM_DIR; default: DIFFBOT)")
     ap.add_argument("--stock-drafter"), ap.add_argument("--image"), ap.add_argument("--diffbot-plan")
     ap.add_argument("--skip-download", action="store_true")
     ap.add_argument("--skip-convert", action="store_true", help="converted shards are already in PACK")
@@ -123,6 +126,7 @@ def main() -> int:
     except ValueError as exc:
         raise SystemExit(str(exc))
     quant, pack, diffbot = Path(rm["QUANT"]), Path(rm["PACK"]), get("DIFFBOT", a.diffbot)
+    engram_dir = get("ENGRAM_DIR", a.engram) or diffbot
     log(f"quant: {rm['MODEL']} ({rm['MODEL_SOURCE']}) -> {quant}; pack -> {pack}")
     stock = get("STOCK_DRAFTER", a.stock_drafter) or (HERE / "drafter-1017")
     image = a.image or env.get("IMAGE") or "dsv41-flash-1017-exl3-3bpw-sm120"
@@ -150,10 +154,12 @@ def main() -> int:
     if not (rec / "serve" / "serve.sh").is_file() or not (rec / "plans" / plan_name).is_file():
         raise SystemExit(f"{diffbot}: not a full download of diffbot's pack (recipe/serve/serve.sh, recipe/plans/{plan_name})")
     for s in ENGRAM_SHARDS:
-        if not (diffbot / s).is_file():
-            raise SystemExit(f"{diffbot / s} missing (diffbot's int4 Engram shard)")
-        if engram_format(diffbot / s) != "int4":
-            raise SystemExit(f"{diffbot / s} does not hold int4 Engram tables")
+        if not (engram_dir / s).is_file():
+            raise SystemExit(f"{engram_dir / s} missing (diffbot's int4 Engram shard; ENGRAM_DIR / --engram points at a folder "
+                             "holding model-00047/48-of-00048.safetensors, e.g. the first recipe's engram-int4)")
+        if engram_format(engram_dir / s) != "int4":
+            raise SystemExit(f"{engram_dir / s} does not hold int4 Engram tables (stock fp8? diffbot's are U8 [N,128] + F16 [N,8])")
+    log(f"Engram: int4 tables from {engram_dir}")
     if not a.no_docker and not a.skip_convert:
         if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
             raise SystemExit(f"docker image {image} missing: build it with {rec}/docker/build.sh")
@@ -214,7 +220,7 @@ def main() -> int:
     for s in DRAFTER_SHARDS:
         link(stock / s, pack / s, a.force_links)
     for s in ENGRAM_SHARDS:
-        link(diffbot / s, pack / s, a.force_links)
+        link(engram_dir / s, pack / s, a.force_links)
     for f in COPY_FILES:
         if (quant / f).is_file():
             shutil.copy2(quant / f, pack / f)
@@ -252,7 +258,8 @@ def main() -> int:
             problems.append(f"config.json lacks quantization_config.{key}")
     total = sum(os.path.getsize(pack / s) for s in set(idx.values()))
     info = {
-        "quant": str(quant), "diffbot": str(diffbot), "stock_drafter": {"repo": STOCK_REPO, "revision": STOCK_REV},
+        "quant": str(quant), "diffbot": str(diffbot), "engram_dir": str(engram_dir),
+        "stock_drafter": {"repo": STOCK_REPO, "revision": STOCK_REV},
         "converted_shards": affected, "dropped_quant_shards": sorted(mtp_only | engram_named),
         "plan": {"from": plan_name, "installed": str(installed)},
         "tensors": len(idx), "shards": len(set(idx.values())), "bytes": total,

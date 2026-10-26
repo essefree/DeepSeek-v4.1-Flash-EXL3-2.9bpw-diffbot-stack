@@ -103,6 +103,7 @@ def main() -> int:
     ap.add_argument("--engram", required=True)
     ap.add_argument("--diffbot-plan", default="")
     ap.add_argument("--keep", default="")
+    ap.add_argument("--engram-dir-mode", action="store_true", help="pass the Engram shards via --engram instead of the diffbot folder")
     a = ap.parse_args()
     work = Path(a.keep) if a.keep else Path(tempfile.mkdtemp(prefix="dsv41-29-"))
     quant, diffbot, pack, stock = work / "quant", work / "diffbot", work / "pack", work / "stock"
@@ -117,8 +118,10 @@ def main() -> int:
     else:
         fake = {f"language_model.model.layers.{L}.ffn.experts": list(range(100)) for L in range(43)}
         json.dump(fake, open(diffbot / "recipe" / "plans" / "plan-1017-agent30-c512.json", "w"))
-    for s in cn.plan_shards.__globals__.get("ENGRAM_SHARDS", ("model-00047-of-00048.safetensors", "model-00048-of-00048.safetensors")):
-        shutil.copy(Path(a.engram) / s, diffbot / s)
+    engram_dst = (work / "engram-elsewhere") if a.engram_dir_mode else diffbot
+    engram_dst.mkdir(parents=True, exist_ok=True)
+    for s in ("model-00047-of-00048.safetensors", "model-00048-of-00048.safetensors"):
+        shutil.copy(Path(a.engram) / s, engram_dst / s)
     stock.mkdir(exist_ok=True)
     for n in (44, 45, 46):
         s = f"model-000{n}-of-00048.safetensors"
@@ -139,7 +142,8 @@ def main() -> int:
 
     rc = subprocess.run([sys.executable, str(ROOT / "prepare_pack.py"), "--quant", str(quant), "--diffbot", str(diffbot),
                          "--pack", str(pack), "--stock-drafter", str(stock), "--skip-convert", "--skip-download",
-                         "--no-docker", "--env", str(work / "none.env")]).returncode
+                         "--no-docker", "--env", str(work / "none.env")]
+                        + (["--engram", str(engram_dst)] if a.engram_dir_mode else [])).returncode
     assert rc == 0, f"prepare_pack.py exit {rc}"
 
     idx = json.load(open(pack / "model.safetensors.index.json"))["weight_map"]
@@ -180,6 +184,7 @@ def main() -> int:
     assert all(len(plan_out[k]) == 0 for k in plan_out if int(k.split(".layers.")[1].split(".")[0]) in (18, 19, 20, 21, 22, 40, 41, 42))
     assert (diffbot / "recipe" / "plans" / "plan-2.9bpw-plan-1017-agent30-c512.json").is_file()
     info = json.load(open(pack / "PACK_INFO.json"))
+    assert info["engram_dir"] == str(engram_dst), info["engram_dir"]
     print(f"ok: {info['shards']} shards, {info['tensors']} tensors, dense EXL3 modules {len(L)}, "
           f"K dist {dict(sorted(collections.Counter(v['bits'] for v in L.values()).items()))}")
     if not a.keep:
