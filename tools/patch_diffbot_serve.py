@@ -5,7 +5,9 @@ Their script requires API_KEY and passes `--api-key` to vLLM, so every request n
 This writes a copy with three exact-text edits (it refuses if their script changed under them):
   * the `API_KEY` requirement becomes optional,
   * `--api-key "$API_KEY"` is passed only when API_KEY is set,
-  * REPO (their recipe directory) is pinned, since the copy lives outside their tree.
+  * REPO (their recipe directory) is pinned, since the copy lives outside their tree,
+  * the sitecustomize mount points at this recipe's overlay/sitecustomize.py, which runs diffbot's
+    and then adds the hooks this quant needs (EXL3 shared experts).
 Matched by pattern, so a revision of their script that reflows those lines still patches.
 The warmup's `Authorization: Bearer` header stays: vLLM ignores it when no key is configured.
 
@@ -36,10 +38,13 @@ EDITS = [
     (re.compile(r'^REPO=\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/\.\." && pwd\)[ \t]*\n', re.M),
      None,  # filled with the pinned recipe path
      'the REPO= line', True),
+    (re.compile(r'-v "\$REPO/patches/vllm/sitecustomize\.py":/usr/lib/python3\.12/sitecustomize\.py:ro'),
+     "SITECUSTOMIZE",  # filled with this recipe's overlay/sitecustomize.py (it loads diffbot's first)
+     'the sitecustomize mount', True),
 ]
 
 
-def patch(text: str, recipe: Path) -> tuple[str, list[str]]:
+def patch(text: str, recipe: Path, overlay: Path | None = None) -> tuple[str, list[str]]:
     notes = []
     for pattern, new, what, required in EDITS:
         hits = pattern.findall(text)
@@ -51,6 +56,9 @@ def patch(text: str, recipe: Path) -> tuple[str, list[str]]:
             continue
         if new is None:
             new = f'REPO={str(recipe)!r}   # [2.9bpw recipe] pinned: this copy lives outside their tree\n'
+        elif new == "SITECUSTOMIZE":
+            site = (overlay or Path(__file__).resolve().parents[1] / "overlay") / "sitecustomize.py"
+            new = f'-v "{site}":/usr/lib/python3.12/sitecustomize.py:ro'
         text = pattern.sub(lambda m: new, text, count=1)
     if 'API_KEY=${API_KEY:-}' not in text and '${API_KEY:?' not in text:
         text = text.replace("set -u\n", "set -u\nAPI_KEY=${API_KEY:-}   # [2.9bpw recipe]\n", 1)
@@ -71,7 +79,7 @@ def main() -> int:
     os.chmod(out, 0o755)
     for n in notes:
         print(f"  note: {n}")
-    print(f"{out}: diffbot's serve.sh with optional API_KEY, SERVED honoured (REPO={recipe})")
+    print(f"{out}: diffbot's serve.sh with optional API_KEY, SERVED honoured, our sitecustomize (REPO={recipe})")
     return 0
 
 
