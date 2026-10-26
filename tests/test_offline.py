@@ -74,6 +74,12 @@ def build_quant_mock(meta: Path, dst: Path) -> None:
         else:
             dt, shape = "BF16", [1]
         files[f][k] = (dt, shape)
+    # the real quant's index is stale: shards 2 and 15 physically hold layers.{1,14}.engram.{k,q}_weight
+    # copies that the index attributes to the Engram shards; emulate that
+    for layer, shard in ((1, wm.get("layers.1.engram.wkv.trellis")), (14, wm.get("layers.14.engram.wkv.trellis"))):
+        if shard:
+            files[shard][f"layers.{layer}.engram.k_weight"] = ("BF16", [4, 5120])
+            files[shard][f"layers.{layer}.engram.q_weight"] = ("BF16", [4, 5120])
     for f, ten in files.items():
         write_header_shard(dst / f, ten)
 
@@ -154,6 +160,7 @@ def main() -> int:
     assert "mtp.0.attn.wo_a.weight" in names and "mtp.0.ffn.experts.0.w1.weight" in names
     assert idx["layers.1.engram.wkv.weight"] == "model-00047-of-00048.safetensors"
     assert "layers.1.engram.wkv.trellis" not in names
+    assert idx["layers.1.engram.k_weight"] == "model-00047-of-00048.safetensors", "stale physical copy dropped"
     assert idx["layers.10.attn.wo_a.weight"].endswith("-of-00043.safetensors") and "layers.10.attn.wo_a.scale" in names
     assert idx["layers.10.attn.wo_b.weight"] and "layers.10.attn.wo_b.scale" in names, "BF16 wo_b -> block-FP8"
     assert "layers.9.attn.wo_b.trellis" in names, "EXL3 wo_b stays EXL3"

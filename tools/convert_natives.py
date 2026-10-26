@@ -61,45 +61,65 @@ def shard_header(path: Path) -> dict:
     return h
 
 
-def plan_shards(src: Path) -> dict[str, dict]:
-    """{shard: {"wo_a": [module...], "wk": [...], "bf16": [tensor names], "drop": [names]}}"""
-    index = json.loads((src / "model.safetensors.index.json").read_text())["weight_map"]
-    by_shard: dict[str, dict] = collections.defaultdict(lambda: {"wo_a": set(), "wk": set(), "bf16": [], "drop": []})
-    for name, shard in index.items():
+def classify(h: dict) -> dict:
+    """What one shard header needs: {"wo_a": [modules], "wk": [modules], "bf16": [names], "drop": [names]}.
+
+    Decided from the shard's own header, never from the index: the quant's index is stale (it lists
+    tensors that are not there and omits some that are), and vLLM loads what the shards hold.
+    """
+    spec = {"wo_a": set(), "wk": set(), "bf16": [], "drop": []}
+    for name, v in h.items():
         m = RE_WOA_SLICE.match(name)
         if m:
-            by_shard[shard]["wo_a"].add(m.group(1))
-            by_shard[shard]["drop"].append(name)
+            spec["wo_a"].add(m.group(1))
+            spec["drop"].append(name)
             continue
         m = RE_WK.match(name)
         if m:
-            by_shard[shard]["wk"].add(m.group(1))
-            by_shard[shard]["drop"].append(name)
+            spec["wk"].add(m.group(1))
+            spec["drop"].append(name)
             continue
-        if RE_BF16_NATIVE.match(name):
-            by_shard[shard]["bf16"].append(name)
+        if RE_BF16_NATIVE.match(name) and v["dtype"] == "BF16":
+            spec["bf16"].append(name)
             continue
         if RE_ENGRAM.match(name) or RE_MTP.match(name):
-            by_shard[shard]["drop"].append(name)
+            spec["drop"].append(name)
+    return {"wo_a": sorted(spec["wo_a"]), "wk": sorted(spec["wk"]), "bf16": sorted(spec["bf16"]),
+            "drop": sorted(spec["drop"])}
+
+
+def needs_work(h: dict) -> bool:
+    s = classify(h)
+    return bool(s["wo_a"] or s["wk"] or s["bf16"] or s["drop"])
+
+
+def shard_role(h: dict) -> str:
+    """'drafter' (only mtp.*: left out, the stock drafter replaces it), 'engram' (only layers.N.engram.*:
+    left out, diffbot's shards replace it), else 'main'."""
+    names = list(h)
+    if names and all(RE_MTP.match(n) for n in names):
+        return "drafter"
+    if names and all(".engram." in n for n in names):
+        return "engram"
+    return "main"
+
+
+def plan_shards(src: Path) -> dict[str, dict]:
+    """{shard: classify(header)} for every main-stack shard file of the quant that needs rewriting."""
     out = {}
-    # the quant's own Engram shards (stock 47/48 next to the EXL3 shards) are replaced by diffbot's int4
-    # ones, never rewritten
-    for s in [s for s in by_shard if all(".engram." in n for n, sh in index.items() if sh == s)]:
-        by_shard.pop(s)
-    # a shard holding only drafter tensors is left out of the pack entirely, not rewritten
-    mtp_only = {s for s, d in by_shard.items() if d["drop"] and all(RE_MTP.match(n) for n in d["drop"])
-                and not d["wo_a"] and not d["wk"] and not d["bf16"]
-                and all(RE_MTP.match(n) for n, sh in index.items() if sh == s)}
-    for s in mtp_only:
-        by_shard.pop(s)
-    for shard, d in by_shard.items():
-        h = shard_header(src / shard)
-        # only BF16-stored natives are converted; an FP8 one (with .scale) is already in DeepSeek's format
-        bf16 = [n for n in d["bf16"] if n in h and h[n]["dtype"] == "BF16"]
-        drop = [n for n in d["drop"] if n in h]
-        if d["wo_a"] or d["wk"] or bf16 or drop:
-            out[shard] = {"wo_a": sorted(d["wo_a"]), "wk": sorted(d["wk"]), "bf16": bf16, "drop": sorted(drop)}
+    for path in sorted(src.glob("*.safetensors")):
+        h = shard_header(path)
+        if shard_role(h) != "main":
+            continue
+        spec = classify(h)
+        if spec["wo_a"] or spec["wk"] or spec["bf16"] or spec["drop"]:
+            out[path.name] = spec
     return out
+
+
+def quant_shards(src: Path) -> dict[str, str]:
+    """{shard file: role} for every *.safetensors in the quant directory."""
+    return {p.name: shard_role(shard_header(p)) for p in sorted(src.glob("*.safetensors"))}
 
 
 # ---------------------------------------------------------------------------

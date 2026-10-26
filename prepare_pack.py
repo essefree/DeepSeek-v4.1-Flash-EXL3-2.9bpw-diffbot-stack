@@ -164,11 +164,12 @@ def main() -> int:
         if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
             raise SystemExit(f"docker image {image} missing: build it with {rec}/docker/build.sh")
     pack.mkdir(parents=True, exist_ok=True)
-    wm = json.loads(q_index.read_text())["weight_map"]
-    quant_shards = sorted(set(wm.values()))
-    mtp_only = {s for s in quant_shards if all(k.startswith("mtp.") for k, f in wm.items() if f == s)}
-    engram_named = {s for s in quant_shards if s in ENGRAM_SHARDS}
-    log(f"quant: {len(quant_shards)} shards in the index, {len(mtp_only)} drafter-only (dropped), "
+    # roles from the shard headers, not the index (the quant's index is stale)
+    roles = convert_natives.quant_shards(quant)
+    quant_shards = sorted(roles)
+    mtp_only = {s for s, r in roles.items() if r == "drafter"}
+    engram_named = {s for s, r in roles.items() if r == "engram" or s in ENGRAM_SHARDS}
+    log(f"quant: {len(quant_shards)} shard files, {len(mtp_only)} drafter-only (dropped), "
         f"{len(engram_named)} Engram (replaced by diffbot's)")
 
     # ---- 2. stock drafter
@@ -194,8 +195,11 @@ def main() -> int:
     affected = sorted(plan)
     log(f"conversion: {len(affected)} shards hold wo_a slices / indexer.wk / BF16 natives / Engram projection")
     manifest = pack / "convert_manifest.json"
+    # a converted shard counts as done only when its header holds nothing left to convert or drop
+    # (an older run may have missed tensors the index did not list)
     done = {s for s in affected if (pack / s).is_file() and not (pack / s).is_symlink()
-            and not _same_file(pack / s, quant / s)}
+            and not _same_file(pack / s, quant / s) and os.access(pack / s, os.R_OK)
+            and not convert_natives.needs_work(header(pack / s))}
     todo = [s for s in affected if s not in done]
     if todo and a.skip_convert:
         raise SystemExit(f"--skip-convert but {len(todo)} converted shards are missing in {pack}: {todo[:3]}...")
