@@ -67,10 +67,12 @@ export DS41_DENSE_GEMV=${DS41_DENSE_GEMV:-0} DS41_DENSE_ONE_COPY=${DS41_DENSE_ON
 export DS41_WOA_FP8=${DS41_WOA_FP8:-0} DS41_FP8_LMHEAD=${DS41_FP8_LMHEAD:-0}
 export LINEAR_BACKEND=${LINEAR_BACKEND-}          # no Marlin MXFP8 dense repack (nothing to repack)
 export DENSE_HYBRID_M=${DENSE_HYBRID_M:-0}
-# diffbot's serve.sh with API_KEY optional (regenerated when their script changes)
+# diffbot's serve.sh with API_KEY optional, SERVED honoured and this recipe's sitecustomize mounted.
+# Regenerated on every start (cheap, and a stale copy once mounted diffbot's sitecustomize after a pull).
 DSERVE=$ROOT/.cache/diffbot-serve.sh
-if [ ! -f "$DSERVE" ] || [ "$REC/serve/serve.sh" -nt "$DSERVE" ]; then
-    python3 "$ROOT/tools/patch_diffbot_serve.py" "$REC" "$DSERVE"
+python3 "$ROOT/tools/patch_diffbot_serve.py" "$REC" "$DSERVE"
+if ! grep -q 'overlay/sitecustomize.py":/usr/lib/python3.12/sitecustomize.py' "$DSERVE"; then
+    echo "[serve] ERROR: $DSERVE does not mount $ROOT/overlay/sitecustomize.py" >&2; exit 1
 fi
 echo "[serve] pack $PACK (2.9 bpw EXL3 on diffbot's stack), plan $PLAN, kernels $XMOE_EXT + $EXL3_DO_DIR, auth $([ -n "$API_KEY" ] && echo 'Bearer token' || echo none)"
 exec bash "$DSERVE"

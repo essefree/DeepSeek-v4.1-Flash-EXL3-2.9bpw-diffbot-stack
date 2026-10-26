@@ -104,6 +104,7 @@ vLLM prefix (K 4/5/6), drafter and Engram names present, no stale slices.
 
 ```bash
 python3 tests/test_offline.py --quant-meta <dir with the quant's json files> --stock-drafter <dir> --engram <dir>
+python3 tests/test_sitecustomize_hook.py   # the shared-expert padding hook, against a fake vLLM model module
 ```
 
 ## Open items (box-verified)
