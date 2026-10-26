@@ -4,20 +4,50 @@
 # Everything else (image, patches, mounts, API, CPU_EXPERTS, 1M context, DSpark k=5, warmup) is theirs;
 # their script documents every knob and all of them can still be set in the environment.
 #
-#   API_KEY=change-me ./serve.sh
+#   API_KEY=change-me ./serve.sh --model /data/models/my-exl3-quant     # a directory
+#   API_KEY=change-me ./serve.sh --model essefree/my-exl3-quant          # a Hugging Face repo (fetched)
+#   API_KEY=change-me ./serve.sh                                         # MODEL= from .env
+# Like the first recipe's start.sh, this does the whole path on the first run: fetch the quant
+# (HF), assemble the pack (prepare_pack.py: stock drafter download + GPU conversion, ~30 min once),
+# build the K=2 kernels (kernels/build.sh), then serve. NO_AUTO_PREPARE=1 only checks and stops.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+MODEL_ARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model) MODEL_ARG="$2"; shift 2 ;;
+        --model=*) MODEL_ARG="${1#--model=}"; shift ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "unknown argument $1 (only --model <dir | hf-org/name>)"; exit 2 ;;
+    esac
+done
 [ -f "$ROOT/.env" ] || { echo "no .env (cp env.example .env)"; exit 1; }
 set -a; source "$ROOT/.env"; set +a
 : "${API_KEY:?set API_KEY}"
-: "${DIFFBOT:?}" "${PACK:?}"
+: "${DIFFBOT:?set DIFFBOT in .env (the downloaded diffbot pack)}"
+model_args=()
+[ -n "$MODEL_ARG" ] && model_args=(--model "$MODEL_ARG")
+resolved="$(python3 "$ROOT/tools/resolve_model.py" --env "$ROOT/.env" ${model_args[@]+"${model_args[@]}"} --shell)" || exit 2
+eval "$resolved"
+export PACK
 REC=$DIFFBOT/recipe
-[ -f "$PACK/config.json" ] || { echo "no $PACK/config.json: run ./prepare_pack.py first"; exit 1; }
-[ -f "$PACK/PACK_INFO.json" ] || { echo "$PACK was not assembled by prepare_pack.py (no PACK_INFO.json)"; exit 1; }
 PLAN_NAME=${PLAN_NAME:-plan-2.9bpw-${DIFFBOT_PLAN:-plan-1017-agent30-c512.json}}
-[ -f "$REC/plans/$PLAN_NAME" ] || { echo "no $REC/plans/$PLAN_NAME: run ./prepare_pack.py (it derives and installs the plan)"; exit 1; }
-[ -d "$REC/kernels/build/xmoe_k2" ] || { echo "no $REC/kernels/build/xmoe_k2: run kernels/build.sh"; exit 1; }
-[ -d "$REC/kernels/build/k2/xmoe_do_i8" ] || { echo "no $REC/kernels/build/k2/xmoe_do_i8: run kernels/build.sh"; exit 1; }
+need_pack=0; need_kernels=0
+[ -f "$PACK/PACK_INFO.json" ] && [ -f "$REC/plans/$PLAN_NAME" ] || need_pack=1
+[ -d "$REC/kernels/build/xmoe_k2" ] && [ -d "$REC/kernels/build/k2/xmoe_do_i8" ] || need_kernels=1
+if [ "${NO_AUTO_PREPARE:-0}" = "1" ]; then
+    [ "$need_pack" = 0 ] || { echo "pack $PACK not assembled: ./prepare_pack.py --model '$MODEL'"; exit 1; }
+    [ "$need_kernels" = 0 ] || { echo "K=2 kernels missing: bash kernels/build.sh"; exit 1; }
+else
+    if [ "$need_pack" = 1 ]; then
+        echo "[serve] pack $PACK not assembled yet -> ./prepare_pack.py --model '$MODEL'"
+        python3 "$ROOT/prepare_pack.py" --env "$ROOT/.env" --model "$MODEL" --pack "$PACK"
+    fi
+    if [ "$need_kernels" = 1 ]; then
+        echo "[serve] K=2 mul1 kernels not built yet -> kernels/build.sh"
+        bash "$ROOT/kernels/build.sh"
+    fi
+fi
 
 # The pack's parent is what their serve.sh mounts (MODELS_DIR); the drafter is inside the pack.
 export PACK MODELS_DIR=${MODELS_DIR:-$(dirname "$PACK")}

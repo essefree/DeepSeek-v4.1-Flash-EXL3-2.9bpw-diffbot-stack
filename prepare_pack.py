@@ -15,7 +15,10 @@
 Steps that need a GPU (the conversion) run in diffbot's image through docker. Everything else is
 header-only Python on the host. Re-runnable: finished steps are skipped.
 
-usage: prepare_pack.py [--env .env] [--skip-download] [--skip-convert] [--no-docker] [--force-links]
+usage: prepare_pack.py [--model <dir | hf-org/name>] [--env .env] [--skip-download] [--skip-convert]
+                       [--no-docker] [--force-links]
+The quant comes from --model / MODEL in .env (a directory, or a Hugging Face repo fetched into
+<recipe>/models/); the pack goes to PACK or <quant>-served.
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ TOOLS = HERE / "tools"
 VENDOR = TOOLS / "vendor"
 sys.path.insert(0, str(TOOLS))
 import convert_natives  # noqa: E402  (plan_shards, header-only)
+import resolve_model  # noqa: E402  (MODEL=<dir | hf-org/name>, PACK default)
 
 STOCK_REPO = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 STOCK_REV = "1bae0e1088993b9b82de08f59de5be5a34e42170"
@@ -102,7 +106,9 @@ def engram_format(path: Path) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--env", default=str(HERE / ".env"))
-    ap.add_argument("--quant"), ap.add_argument("--diffbot"), ap.add_argument("--pack")
+    ap.add_argument("--model", help="quant: a directory or a Hugging Face repo id (MODEL in .env)")
+    ap.add_argument("--quant", help="alias of --model for a directory")
+    ap.add_argument("--diffbot"), ap.add_argument("--pack")
     ap.add_argument("--stock-drafter"), ap.add_argument("--image"), ap.add_argument("--diffbot-plan")
     ap.add_argument("--skip-download", action="store_true")
     ap.add_argument("--skip-convert", action="store_true", help="converted shards are already in PACK")
@@ -112,18 +118,34 @@ def main() -> int:
     a = ap.parse_args()
     env = read_env(Path(a.env))
     get = lambda key, flag: Path(flag) if flag else (Path(env[key]) if env.get(key) else None)
-    quant, diffbot, pack = get("QUANT", a.quant), get("DIFFBOT", a.diffbot), get("PACK", a.pack)
+    try:
+        rm = resolve_model.resolve(a.model or a.quant, env, a.pack)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    quant, pack, diffbot = Path(rm["QUANT"]), Path(rm["PACK"]), get("DIFFBOT", a.diffbot)
+    log(f"quant: {rm['MODEL']} ({rm['MODEL_SOURCE']}) -> {quant}; pack -> {pack}")
     stock = get("STOCK_DRAFTER", a.stock_drafter) or (HERE / "drafter-1017")
     image = a.image or env.get("IMAGE") or "dsv41-flash-1017-exl3-3bpw-sm120"
     plan_name = a.diffbot_plan or env.get("DIFFBOT_PLAN") or "plan-1017-agent30-c512.json"
-    for name, p in (("QUANT", quant), ("DIFFBOT", diffbot), ("PACK", pack)):
-        if p is None:
-            raise SystemExit(f"{name} not set (in {a.env} or --{name.lower()})")
+    if diffbot is None:
+        raise SystemExit(f"DIFFBOT not set (in {a.env} or --diffbot): the path of diffbot's downloaded pack")
 
-    # ---- 1. inputs
+    # ---- 1. inputs (an HF repo is fetched whole: the EXL3 shards are the bulk of it)
+    ok, why = resolve_model.quant_complete(quant)
+    if not ok and rm["MODEL_SOURCE"] == "hf":
+        if a.skip_download:
+            raise SystemExit(f"{quant}: {why} (--skip-download given)")
+        hf = shutil.which("hf") or shutil.which("huggingface-cli")
+        if not hf:
+            raise SystemExit("need the Hugging Face CLI: pip install -U 'huggingface_hub[hf_transfer]'")
+        log(f"fetching {rm['HF_MODEL_REPO']} -> {quant} (resumable; private repos need HF_TOKEN)")
+        quant.mkdir(parents=True, exist_ok=True)
+        run([hf, "download", rm["HF_MODEL_REPO"], "--local-dir", quant, "--max-workers", os.environ.get("HF_MAX_WORKERS", "8")],
+            env={**os.environ, "HF_HUB_ENABLE_HF_TRANSFER": os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "1")})
+        ok, why = resolve_model.quant_complete(quant)
+    if not ok:
+        raise SystemExit(f"{quant}: {why}")
     q_index = quant / "model.safetensors.index.json"
-    if not (quant / "config.json").is_file() or not q_index.is_file():
-        raise SystemExit(f"{quant}: config.json / model.safetensors.index.json missing")
     rec = diffbot / "recipe"
     if not (rec / "serve" / "serve.sh").is_file() or not (rec / "plans" / plan_name).is_file():
         raise SystemExit(f"{diffbot}: not a full download of diffbot's pack (recipe/serve/serve.sh, recipe/plans/{plan_name})")

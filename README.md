@@ -76,11 +76,17 @@ with `recipe/` and shards 47/48), their image built (`bash recipe/docker/build.s
 
 ```bash
 git clone https://github.com/essefree/DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack.git && cd DeepSeek-v4.1-Flash-EXL3-2.9bpw-diffbot-stack
-cp env.example .env            # QUANT, DIFFBOT, PACK paths
-./prepare_pack.py              # fetches stock 44-46 (7.4 GiB), converts, assembles ./pack (one-time, ~30 min)
-bash kernels/build.sh          # xmoe29 + xmoe_do_i8 with K=2 mul1, into diffbot's kernels/build/
-API_KEY=change-me ./serve.sh   # :8000, model name from .env
+cp env.example .env                                     # DIFFBOT (and MODEL, or pass --model)
+API_KEY=change-me ./serve.sh --model /data/models/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw
 ```
+
+`--model` takes the quant the way the first recipe does: a local directory, or a Hugging Face repo id
+(`essefree/my-exl3-quant`, fetched into `./models/`); `MODEL=` in `.env` is the same thing. The first run
+does the whole path: fetches the stock 1017 drafter (7.4 GiB), converts the few modules in diffbot's image
+(GPU, ~30 min once), assembles the pack as `<quant>-served` next to the quant (hardlinks, so ~25 GB of new
+data), builds the K=2 kernels into diffbot's `recipe/kernels/build/`, then serves on `:8000`. Later runs go
+straight to serving. The steps also run on their own: `./prepare_pack.py --model ...`, `bash kernels/build.sh`;
+`NO_AUTO_PREPARE=1 ./serve.sh` only checks.
 
 ## Tests (no GPU)
 
