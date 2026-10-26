@@ -21,29 +21,40 @@ import re
 
 # (pattern, replacement, what): each must match exactly once, wherever it sits on its line, so a
 # revision of their script that moves things around still patches, and one that changed them refuses.
+# (pattern, replacement, what, required): each must match at most once, wherever it sits on its line, so
+# a revision of their script that moves things around still patches; a required one that is missing refuses.
 EDITS = [
     (re.compile(r'^: "\$\{API_KEY:\?[^}]*\}"[ \t]*\n', re.M),
      'API_KEY=${API_KEY:-}   # [2.9bpw recipe] empty = no authentication\n',
-     'the `: "${API_KEY:?...}"` requirement'),
+     'the `: "${API_KEY:?...}"` requirement', False),
     (re.compile(r'--api-key "\$API_KEY"'),
      '${API_KEY:+--api-key "$API_KEY"}',
-     'the `--api-key "$API_KEY"` argument'),
+     'the `--api-key "$API_KEY"` argument', False),   # absent in a hand-edited copy: then nothing to do
+    (re.compile(r'--served-model-name[ \t]+(?:"\$SERVED"|\$SERVED|[^ \t\\]+)'),
+     '--served-model-name "$SERVED"',
+     'the `--served-model-name` argument', True),       # a hand-edited copy may hardcode a name; SERVED must win
     (re.compile(r'^REPO=\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/\.\." && pwd\)[ \t]*\n', re.M),
      None,  # filled with the pinned recipe path
-     'the REPO= line'),
+     'the REPO= line', True),
 ]
 
 
-def patch(text: str, recipe: Path) -> str:
-    for pattern, new, what in EDITS:
+def patch(text: str, recipe: Path) -> tuple[str, list[str]]:
+    notes = []
+    for pattern, new, what, required in EDITS:
         hits = pattern.findall(text)
-        if len(hits) != 1:
+        if len(hits) > 1 or (required and not hits):
             raise SystemExit(f"diffbot's serve.sh differs from what this patch expects: {what} found {len(hits)} times "
-                             f"(run: grep -n 'API_KEY\\|^REPO=' {recipe}/serve/serve.sh)")
+                             f"(run: grep -n 'API_KEY\\|served-model-name\\|^REPO=' {recipe}/serve/serve.sh)")
+        if not hits:
+            notes.append(f"{what}: not present (hand-edited copy?), nothing to change")
+            continue
         if new is None:
             new = f'REPO={str(recipe)!r}   # [2.9bpw recipe] pinned: this copy lives outside their tree\n'
         text = pattern.sub(lambda m: new, text, count=1)
-    return text
+    if 'API_KEY=${API_KEY:-}' not in text and '${API_KEY:?' not in text:
+        text = text.replace("set -u\n", "set -u\nAPI_KEY=${API_KEY:-}   # [2.9bpw recipe]\n", 1)
+    return text, notes
 
 
 def main() -> int:
@@ -55,9 +66,12 @@ def main() -> int:
     if not src.is_file():
         raise SystemExit(f"{src} missing")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(patch(src.read_text(), recipe))
+    text, notes = patch(src.read_text(), recipe)
+    out.write_text(text)
     os.chmod(out, 0o755)
-    print(f"{out}: diffbot's serve.sh with optional API_KEY (REPO={recipe})")
+    for n in notes:
+        print(f"  note: {n}")
+    print(f"{out}: diffbot's serve.sh with optional API_KEY, SERVED honoured (REPO={recipe})")
     return 0
 
 
