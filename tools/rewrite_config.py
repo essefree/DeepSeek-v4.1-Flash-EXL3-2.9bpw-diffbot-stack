@@ -7,7 +7,8 @@ against vLLM *module* prefixes, which for DeepSeek-V4.1 in diffbot's vLLM are re
 fused:
 
   layers.N.attn.wq_a + layers.N.attn.wkv          -> language_model.model.layers.N.attn.fused_wqa_wkv
-  layers.N.attn.compressor.wkv + .wgate           -> ...attn.compressor.fused_wkv_wgate
+  layers.N.attn.compressor.wkv + .wgate           -> (not EXL3: vLLM builds that linear with quant_config=None;
+                                                      convert_natives.py stores them as BF16 weights)
   layers.N.ffn.shared_experts.w1 + .w3            -> ...ffn.shared_experts.gate_up_proj
   layers.N.ffn.shared_experts.w2                  -> ...ffn.shared_experts.down_proj
   layers.N.<anything else>                        -> language_model.model.layers.N.<anything else>
@@ -60,7 +61,8 @@ def map_key(key: str) -> str | None:
     if not m:
         return None  # mtp.*, vision.*, ...
     layer, tail = m.group(1), m.group(2)
-    if ".wo_a.slice." in tail or tail == "attn.indexer.wk" or tail.startswith("engram."):
+    if ".wo_a.slice." in tail or tail in ("attn.indexer.wk", "attn.compressor.wkv", "attn.compressor.wgate") \
+            or tail.startswith("engram."):
         return None  # converted to DeepSeek's format by convert_natives.py / taken from the Engram shards
     tail = FUSED.get(tail, (tail, 0))[0]
     return f"{ROOT_PREFIX}layers.{layer}.{tail}"

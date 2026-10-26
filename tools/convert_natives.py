@@ -43,7 +43,10 @@ WO_A_GROUPS = 8
 EXL3_SUFFIXES = ("trellis", "suh", "svh", "mul1", "mcg")
 
 RE_WOA_SLICE = re.compile(r"^(layers\.\d+\.attn\.wo_a)\.slice\.(\d+)\.(trellis|suh|svh|mul1|mcg)$")
-RE_WK = re.compile(r"^(layers\.\d+\.attn\.indexer\.wk)\.(trellis|suh|svh|mul1|mcg)$")
+# EXL3 modules that go back to DeepSeek's BF16 `.weight`: this vLLM builds these linears with
+# quant_config=None (indexer.wk, the compressor's wkv/wgate: see sparse_attn_indexer.py / compressor.py),
+# so no quantization method ever sees them and the loader expects a plain BF16 weight (stock has BF16).
+RE_UNQUANT = re.compile(r"^(layers\.\d+\.attn\.(?:indexer\.wk|compressor\.wkv|compressor\.wgate))\.(trellis|suh|svh|mul1|mcg)$")
 RE_BF16_NATIVE = re.compile(r"^(layers\.\d+\.(?:attn\.wo_b|ffn\.shared_experts\.w2))\.weight$")
 # The Engram projection (layers 1 and 14): the served pack takes DeepSeek's FP8 wkv and the BF16
 # q/k weights from diffbot's Engram shards 47/48 (stock 1017 tensors next to the int4 tables), so the
@@ -66,12 +69,12 @@ def shard_header(path: Path) -> dict:
 
 
 def classify(h: dict) -> dict:
-    """What one shard header needs: {"wo_a": [modules], "wk": [modules], "bf16": [names], "drop": [names]}.
+    """What one shard header needs: {"wo_a": [modules], "unquant": [EXL3 modules -> BF16 weight], "bf16": [names], "drop": [names]}.
 
     Decided from the shard's own header, never from the index: the quant's index is stale (it lists
     tensors that are not there and omits some that are), and vLLM loads what the shards hold.
     """
-    spec = {"wo_a": set(), "wk": set(), "bf16": [], "drop": [], "head": False}
+    spec = {"wo_a": set(), "unquant": set(), "bf16": [], "drop": [], "head": False}
     for name, v in h.items():
         if RE_HEAD.match(name):
             spec["head"] = True
@@ -82,9 +85,9 @@ def classify(h: dict) -> dict:
             spec["wo_a"].add(m.group(1))
             spec["drop"].append(name)
             continue
-        m = RE_WK.match(name)
+        m = RE_UNQUANT.match(name)
         if m:
-            spec["wk"].add(m.group(1))
+            spec["unquant"].add(m.group(1))
             spec["drop"].append(name)
             continue
         if RE_BF16_NATIVE.match(name) and v["dtype"] == "BF16":
@@ -92,13 +95,13 @@ def classify(h: dict) -> dict:
             continue
         if RE_ENGRAM.match(name) or RE_MTP.match(name):
             spec["drop"].append(name)
-    return {"wo_a": sorted(spec["wo_a"]), "wk": sorted(spec["wk"]), "bf16": sorted(spec["bf16"]),
+    return {"wo_a": sorted(spec["wo_a"]), "unquant": sorted(spec["unquant"]), "bf16": sorted(spec["bf16"]),
             "drop": sorted(spec["drop"]), "head": spec["head"]}
 
 
 def needs_work(h: dict) -> bool:
     s = classify(h)
-    return bool(s["wo_a"] or s["wk"] or s["bf16"] or s["drop"])
+    return bool(s["wo_a"] or s["unquant"] or s["bf16"] or s["drop"])
 
 
 def shard_role(h: dict) -> str:
@@ -120,7 +123,7 @@ def plan_shards(src: Path) -> dict[str, dict]:
         if shard_role(h) != "main":
             continue
         spec = classify(h)
-        if spec["wo_a"] or spec["wk"] or spec["bf16"] or spec["drop"] or spec["head"]:
+        if spec["wo_a"] or spec["unquant"] or spec["bf16"] or spec["drop"] or spec["head"]:
             out[path.name] = spec
     return out
 
@@ -189,7 +192,7 @@ def convert_shard(src: Path, out: Path, shard: str, spec: dict, device) -> dict:
             tensors[k] = f.get_tensor(k)
     drop = set(spec["drop"])
     added = {}
-    stats = {"shard": shard, "wo_a": [], "wk": [], "bf16": [], "head": False, "err": {}}
+    stats = {"shard": shard, "wo_a": [], "unquant": [], "bf16": [], "head": False, "err": {}}
     with torch.no_grad():
         for mod in spec["wo_a"]:
             parts = []
@@ -201,10 +204,10 @@ def convert_shard(src: Path, out: Path, shard: str, spec: dict, device) -> dict:
             stats["wo_a"].append(mod)
             stats["err"][mod] = _rel_err(w, q, s)
             del parts, w
-        for mod in spec["wk"]:
-            w = reconstruct(tensors, mod, device)                                  # [128, 512]
+        for mod in spec["unquant"]:
+            w = reconstruct(tensors, mod, device)                   # wk [128, 512]; compressor wkv/wgate [512, 5120]
             added[mod + ".weight"] = w.to(torch.bfloat16).cpu()
-            stats["wk"].append(mod)
+            stats["unquant"].append(mod)
         if spec.get("head"):
             w = reconstruct(tensors, "head", device)                               # [129280, 5120]
             added["head.weight"] = w.to(torch.bfloat16).cpu()
@@ -253,10 +256,10 @@ def main() -> int:
     if a.plan or not a.out:
         summary = {s: {k: (len(v) if isinstance(v, list) else v) for k, v in d.items()} for s, d in plan.items()}
         n_woa = sum(len(d["wo_a"]) for d in plan.values())
-        n_wk = sum(len(d["wk"]) for d in plan.values())
+        n_unq = sum(len(d["unquant"]) for d in plan.values())
         n_bf = sum(len(d["bf16"]) for d in plan.values())
         n_head = sum(1 for d in plan.values() if d.get("head"))
-        print(f"{len(plan)} shards to rewrite: wo_a modules {n_woa}, indexer.wk {n_wk}, bf16 natives {n_bf}, lm_head {n_head}, "
+        print(f"{len(plan)} shards to rewrite: wo_a modules {n_woa}, EXL3->BF16 (indexer.wk, compressor) {n_unq}, bf16 natives {n_bf}, lm_head {n_head}, "
               f"EXL3 tensors dropped {sum(len(d['drop']) for d in plan.values())}")
         if a.manifest:
             json.dump({"plan": plan}, open(a.manifest, "w"), indent=1)
@@ -269,7 +272,7 @@ def main() -> int:
     for shard in sorted(plan):
         if only and shard not in only:
             continue
-        print(f"{shard}: wo_a {len(plan[shard]['wo_a'])} wk {len(plan[shard]['wk'])} bf16 {len(plan[shard]['bf16'])}"
+        print(f"{shard}: wo_a {len(plan[shard]['wo_a'])} unquant {len(plan[shard]['unquant'])} bf16 {len(plan[shard]['bf16'])}"
               f"{' head' if plan[shard].get('head') else ''} drop {len(plan[shard]['drop'])} ...",
               flush=True)
         st = convert_shard(src, Path(a.out), shard, plan[shard], device)

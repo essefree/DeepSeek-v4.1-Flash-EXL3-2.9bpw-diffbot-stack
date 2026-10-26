@@ -3,7 +3,7 @@
 
   PACK/
     model-000NN-of-00043.safetensors   the quant's shards: hardlinked, except the ones that held wo_a
-                                       slices / indexer.wk / BF16 wo_b, w2 / the Engram projection,
+                                       slices / indexer.wk, compressor wkv+wgate / BF16 wo_b, w2 / the Engram projection,
                                        which tools/convert_natives.py rewrote (DeepSeek block-FP8, BF16)
     model-00044..46-of-00048.safetensors  stock DeepSeek-V4.1-Flash-1017 drafter (hardlinked)
     model-00047..48-of-00048.safetensors  diffbot's int4 Engram tables (hardlinked from ENGRAM_DIR, default
@@ -193,7 +193,7 @@ def main() -> int:
     # ---- 3. conversion plan + GPU conversion
     plan = convert_natives.plan_shards(quant)
     affected = sorted(plan)
-    log(f"conversion: {len(affected)} shards hold wo_a slices / indexer.wk / BF16 natives / Engram projection")
+    log(f"conversion: {len(affected)} shards hold wo_a slices / indexer.wk, compressor / BF16 natives / Engram projection")
     manifest = pack / "convert_manifest.json"
     # a converted shard counts as done only when its header holds nothing left to convert or drop
     # (an older run may have missed tensors the index did not list)
@@ -251,7 +251,8 @@ def main() -> int:
     idx = json.loads((pack / "model.safetensors.index.json").read_text())["weight_map"]
     names = set(idx)
     problems = []
-    for bad in ("wo_a.slice.", ".indexer.wk.trellis", ".engram.wkv.trellis", "head.trellis"):
+    for bad in ("wo_a.slice.", ".indexer.wk.trellis", ".compressor.wkv.trellis", ".compressor.wgate.trellis",
+                ".engram.wkv.trellis", "head.trellis"):
         hits = [n for n in names if bad in n]
         if hits:
             problems.append(f"{len(hits)} unconverted tensors like {hits[0]}")

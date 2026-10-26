@@ -39,12 +39,13 @@ been measured yet.
 The `vllm-exl3` plugin reads an ExLlamaV3-native pack when `config.json` is rewritten into its
 vocabulary (`layer_bits`, `non_routed_exl3.layers`), which its own `tools/exl3_pack_tools` do. Checked
 against this quant's shard headers (every tensor, no weights): experts K=3 with layers 18–22 at K=2,
-1,766 dense EXL3 linears, codebook mul1, lm_head K=6. Three things the stack cannot take as they are:
+1,766 dense EXL3 linears, codebook mul1, lm_head K=6. What the stack cannot take as it is:
 
 | Module | In the quant | Problem | What `prepare_pack.py` does |
 |---|---|---|---|
 | `attn.wo_a` (40 layers) | 8 EXL3 K=5 slices per layer (`wo_a.slice.0..7`) | nightly vLLM builds `wo_a` as one grouped (`is_bmm`) linear; the plugin has no path for packed slices | reconstructs the slices with ExLlamaV3 (exact w.r.t. the quantized values), concatenates them into DeepSeek's `[8192, 4096]` layout and stores them in DeepSeek's **block-FP8** format (e4m3 + ue8m0 scales per 32×32), which the stack's FP8 delegate serves |
-| `attn.indexer.wk` (4 layers) | EXL3 K=8 | the plugin accepts dense K 2–6 only | same: reconstruct → block-FP8 (4 tiny 128×512 tensors) |
+| `attn.indexer.wk` (4 layers) | EXL3 K=8 | vLLM builds this linear with `quant_config=None` (and the plugin accepts dense K 2–6 only) | reconstruct → BF16 `.weight` (4 tiny 128×512 tensors, as stock) |
+| `attn.compressor.wkv`, `.wgate` (layers 2, 8, 14, 20; no gate in layer 20) | EXL3 K=5 | vLLM builds the fused compressor linear with `quant_config=None`: no quant method sees it, the loader wants a BF16 weight | reconstruct → BF16 `.weight [512, 5120]` (as stock) |
 | `attn.wo_b`, `ffn.shared_experts.w2` (layers 10–36) | plain BF16 `.weight` (54 tensors) | the FP8 delegate expects scales; stock has these in block-FP8 | BF16 → block-FP8 (lossy at FP8 precision, the same precision DeepSeek ships these in) |
 | `head` (lm_head) | EXL3 K=6 | this vLLM's DeepSeek loader routes only the name `head.weight` to lm_head | reconstructed (exact for K=6) to DeepSeek's BF16 `head.weight [129280, 5120]`; diffbot's `DS41_FP8_LMHEAD` can then apply |
 | `mtp.*` (drafter) | EXL3 K=4 | no K=4 `xmoe` kernels, and a weak drafter | dropped; stock 1017 shards 44–46 take their place, `mtp_experts: "source"` |
@@ -99,7 +100,7 @@ straight to serving. The steps also run on their own: `./prepare_pack.py --model
 `tests/test_offline.py` builds a header-only mock of the quant from its index and `quantization_config.json`,
 fakes the conversion exactly as `convert_natives.py` would rewrite each shard, mocks diffbot's pack and the
 stock drafter from real shard headers, runs `prepare_pack.py` on it and checks the result: 41 shards
-rewritten (40 layer shards for `wo_a`, shard 43 for lm_head and the drafter leftovers), 158 dense EXL3 modules keyed by
+rewritten (40 layer shards for `wo_a`, shard 43 for lm_head and the drafter leftovers), 154 dense EXL3 modules keyed by
 vLLM prefix (K 4/5/6), drafter and Engram names present, no stale slices.
 
 ```bash
